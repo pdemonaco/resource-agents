@@ -445,6 +445,11 @@ db2_start() {
 
         start_cmd="db2 activate db $db"
 
+        # Potentially start the system as HADR master under the following
+        # conditions:
+        #   * db2 config indicates this node is HADR_PRIMARY
+        #   * current last-active log is not behind the latest log
+        #   * another active master does not already exist in the cluster
         if [ $HADR_ROLE = PRIMARY ]
         then
             local master_fal
@@ -456,9 +461,25 @@ db2_start() {
             # error: Can't use > in [ ]. Escape it or use [[..]]. [SC2073]
             # see https://github.com/koalaman/shellcheck/issues/691
             # shellcheck disable=SC2073
-            if master_fal=$(db2_fal_attrib $db get) && [ "$master_fal" '>' $FIRST_ACTIVE_LOG ]
+            if master_fal=$(db2_fal_attrib "${db}" get) && \
+                [ "${master_fal}" '>' "${FIRST_ACTIVE_LOG}" ]
             then
-                ocf_log info "DB2 database $instance($db2node)/$db is Primary and outdated, starting as secondary"
+                ocf_log info "DB2 database $instance($db2node)/$db is primary and outdated, starting as secondary"
+                ROLE_OVERRIDE=0
+            # Dont try to start as primary if cluster already has an active master
+            elif crm_resource query -W -r "${OCF_RESOURCE_INSTANCE}" 2>&1 | grep -q Master
+            then
+                ocf_log info "DB2 database $instance($db2node)/$db already has a primary, starting as secondary"
+                ROLE_OVERRIDE=0
+            else
+                ocf_log info "DB2 database $instance($db2node)/$db starting as primary"
+                ROLE_OVERRIDE=1
+            fi
+
+            # If either of the role override conditions are met, start as
+            # standby instead of primary
+            if [ "${ROLE_OVERRIDE}" -eq 0 ]
+            then
                 start_cmd="db2 start hadr on db $db as standby"
                 HADR_ROLE=STANDBY
             fi
